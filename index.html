@@ -290,7 +290,7 @@
   <!-- Heatmap mode panel: position, visibility and handlers set by the script. -->
   <div class="control-panel mode-panel" id="modePanel">
     <button type="button" class="action-button mode-button" data-mode="weights">Weights</button>
-    <button type="button" class="action-button mode-button" data-mode="trace">Trace</button>
+    <button type="button" class="action-button mode-button" data-mode="favorites">Favorites</button>
     <button type="button" class="action-button mode-button" data-mode="contribution">Contribution</button>
   </div>
   </div>
@@ -378,7 +378,7 @@
     const HEATMAP_SIZE = 224;   // height (and 14x14 width) of the heatmap
     const HEATMAP_GAP  = 40;    // vertical gap between classifier and heatmap
     const HEATMAP_LABEL_GAP = 32;  // from the heatmap's bottom to its label
-    // Trace and Contribution modes average over this many training images
+    // Favorites and Contribution modes average over this many training images
     // (the first ones, which mix all ten digits), recomputed every
     // STATS_EVERY frames while training. Fewer images = faster but noisier.
     const ANALYSIS_IMAGES = 2000;
@@ -388,12 +388,12 @@
     // and then redraws the weights, so the display speed is roughly
     // 60 x BATCHES_PER_FRAME x BATCH_SIZE images per second (~1 pass over
     // the 10,000 training images per second at these settings).
-    const LEARNING_RATE     = 0.1;
+    const LEARNING_RATE     = 0.05;
     const BATCH_SIZE        = 32;
     // L1 penalty: adds L1_PENALTY x (sum of |weight|) to the loss, which
     // pushes unhelpful weights to exactly 0. Applies to every weight,
     // including the classifier's, but not to biases. 0 turns it off.
-    const L1_PENALTY        = 3e-4;
+    const L1_PENALTY        = 3e-5;
     const BATCHES_PER_FRAME = 5;
     // While training, the top guess and the accuracies refresh only every
     // this-many frames (~1.5 times a second), so the numbers hold still long
@@ -1105,7 +1105,7 @@
     //   Weights:      the neuron's incoming weights. A first-layer neuron's
     //                 196 weights form a 14x14 grid; a later neuron's 10
     //                 weights form a 1x10 column.
-    //   Trace:        the average training image, weighted by how much more
+    //   Favorites:    the average training image, weighted by how much more
     //                 each one activates the neuron than the least-activating
     //                 image does: what turns it on (most).
     //   Contribution: for each pixel, the average of (pixel value x the
@@ -1115,11 +1115,11 @@
     // Two layouts are built once, and the one that fits is shown: the grid
     // (14x14) or the column (1x10, Weights mode for later neurons only).
     // Weights and Contribution: white at 0, blending to blue (positive) or
-    // red (negative). Trace: grayscale, like the input image. Each map is
+    // red (negative). Favorites: grayscale, like the input image. Each map is
     // scaled to its own largest value, so its pattern shows even when its
     // values are small.
     let selected = null;        // { l, j }: neuron j of hidden layer l + 1, or null
-    let heatmapMode = "weights";  // "weights", "trace" or "contribution"
+    let heatmapMode = "weights";  // "weights", "favorites" or "contribution"
 
     const heatmapTop = classifierY + CLASSIFIER_H / 2 + HEATMAP_GAP;
 
@@ -1168,20 +1168,20 @@
       return `rgb(${rgb.join(", ")})`;
     }
 
-    // Trace and Contribution maps for neuron j of hidden layer l + 1,
+    // Favorites and Contribution maps for neuron j of hidden layer l + 1,
     // averaged over the first ANALYSIS_IMAGES training images. Returns two
     // arrays of 196 values (one per pixel).
     function analyzeNeuron(l, j) {
       const contribution = new Array(NUM_INPUTS).fill(0);
       const count = Math.min(ANALYSIS_IMAGES, data.train.count);
 
-      // Trace weights each image by (its activation - the lowest activation
-      // over all the images), so the least-activating image gets weight 0
+      // The Favorites map weights each image by (its activation - the lowest
+      // activation over all the images), so the least-activating image gets weight 0
       // and every weight is >= 0. That needs the lowest activation, which is
       // only known at the end; but sum of (a - min) * x = (sum of a * x) -
       // min * (sum of x), so one pass can collect the sums and finish after.
       // (Weighting by the activation alone would leave a neuron that's
-      // negative for every image with no trace at all.)
+      // negative for every image with a blank map.)
       const sumAX = new Array(NUM_INPUTS).fill(0);  // sum of activation x pixel
       const sumX  = new Array(NUM_INPUTS).fill(0);  // sum of pixel
       let sumA = 0;
@@ -1222,15 +1222,15 @@
 
       // Total weight; 0 only if every image activates the neuron equally.
       const totalWeight = sumA - minA * count;
-      const trace = sumAX.map((s, p) =>
+      const favorites = sumAX.map((s, p) =>
         totalWeight > 0 ? (s - minA * sumX[p]) / totalWeight : 0);
       for (let p = 0; p < NUM_INPUTS; p++) contribution[p] /= count;
-      return { trace, contribution };
+      return { favorites, contribution };
     }
 
     // Show the selected neuron's heatmap in the current mode (or hide it if
     // none is selected), bold the selected neuron's outline, and show or
-    // hide the mode panel. Trace and Contribution run images through the
+    // hide the mode panel. Favorites and Contribution run images through the
     // network, so they cost more than Weights (see trainLoop).
     function updateHeatmap() {
       neuronCircles.forEach((layer, l) => layer.forEach((circle, j) => {
@@ -1254,7 +1254,7 @@
         values = new Array(NUM_INPUTS).fill(0);  // data still loading
       }
       const maxAbs = Math.max(...values.map(Math.abs)) || 1;  // || 1: all zeros
-      if (heatmapMode === "trace") {
+      if (heatmapMode === "favorites") {
         colorOf = v => valueToGray(v / maxAbs);
       } else {
         colorOf = v => heatColor(v, maxAbs);
@@ -1435,7 +1435,7 @@
       updateCounters();
       frameCount++;
       const statsFrame = (frameCount % STATS_EVERY === 0);
-      // Weights heatmap: cheap, so every frame. Trace and Contribution run
+      // Weights heatmap: cheap, so every frame. Favorites and Contribution run
       // images through the network, so only with the other stats.
       if (selected !== null && (heatmapMode === "weights" || statsFrame)) {
         updateHeatmap();

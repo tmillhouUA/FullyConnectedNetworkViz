@@ -125,6 +125,7 @@ async function main() {
 // labels: one digit character per image, in the same order.
 //
 // MNIST is by Yann LeCun, Corinna Cortes and Christopher J.C. Burges.
+// MNIST is commonly distributed under CC BY-SA 3.0.
 window.MNIST14 = {
   rows: ${OUT_SIZE},
   cols: ${OUT_SIZE},
