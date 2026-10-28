@@ -96,10 +96,10 @@
       fill: none;
     }
 
-    /* Lines into the classifier carry no weight display: it's a black box. */
+    /* Lines into the classifier stay gray: it's a black box. Their
+       stroke-width is set by the script (see classifierToStroke). */
     .classifier-link {
       stroke: #bbbbbb;
-      stroke-width: 1;
     }
 
     /* Clicks go to the hit targets below, not the visible circles. */
@@ -349,9 +349,11 @@
     // fraction makes the shown size an exponentially decaying average over
     // roughly the last 1 / 0.05 = 20 frames (~1/3 second), so it doesn't
     // jitter. Otherwise (after pausing or a new image), a larger fraction
-    // animates it quickly (~1/4 second) to the exact current value.
+    // animates it quickly (~1/5 second) to the exact current value.
+    // 0.4375 leaves 0.5625 = 0.75^2 of the gap each frame, so it's exactly
+    // twice as fast as 0.25 (which leaves 0.75).
     const SIZE_SMOOTHING_TRAINING = 0.05;
-    const SIZE_SMOOTHING_SETTLE   = 0.25;
+    const SIZE_SMOOTHING_SETTLE   = 0.4375;
 
     // Softmax classifier: a black box, centered vertically.
     const CLASSIFIER_X = 1400;  // center x
@@ -490,7 +492,8 @@
     // deviation sqrt(2 / number of inputs to the neuron).
     // Each neuron also has a bias (biases[l][j], not drawn), starting at 0.
     // The classifier has its own weights and biases (classifierWeights[k][j]
-    // from hidden neuron j to digit k), also not drawn. Its weights start
+    // from hidden neuron j to digit k), not drawn individually (see
+    // classifierToStroke for the summary its lines show). Its weights start
     // with standard deviation sqrt(1 / number of inputs), the usual choice
     // for a layer without ReLU.
     const layerInputCounts = [NUM_INPUTS, ...LAYER_SIZES.slice(0, -1)];  // [196, 10, 10]
@@ -904,7 +907,8 @@
       weightLines.push(layerLines);
     }
 
-    // Apply every weight's color and thickness to its line.
+    // Apply every weight's color and thickness to its line, and each
+    // classifier line's thickness (classifierLines is defined below).
     function updateWeightDisplay() {
       for (let l = 0; l < weights.length; l++) {
         for (let j = 0; j < weights[l].length; j++) {
@@ -916,8 +920,10 @@
           }
         }
       }
+      classifierLines.forEach((line, j) => {
+        line.style.strokeWidth = classifierToStroke(j);
+      });
     }
-    updateWeightDisplay();
 
     // Neurons, drawn over the lines, and their click targets, drawn over
     // everything nearby. neuronCircles[l][j] and neuronHits[l][j] are
@@ -999,18 +1005,33 @@
       }
     }
 
-    // Classifier: plain gray lines from the last hidden layer, converging on
+    // Classifier: gray lines from the last hidden layer, converging on
     // the middle of the box's left edge (so the upper ones pass below the
     // accuracy panel rather than under it), in a layer behind the neurons;
-    // then the box itself.
+    // then the box itself. classifierLines[j] comes from hidden neuron j.
     const classifierY = VIEW_H / 2;
-    for (const from of layerPoints[layerPoints.length - 1]) {
-      classifierLinksLayer.appendChild(makeSvg("line", {
+    const classifierLines = layerPoints[layerPoints.length - 1].map(from => {
+      const line = makeSvg("line", {
         class: "classifier-link",
         x1: from.x, y1: from.y,
         x2: CLASSIFIER_X - CLASSIFIER_W / 2, y2: classifierY,
-      }));
+      });
+      classifierLinksLayer.appendChild(line);
+      return line;
+    });
+
+    // A classifier line's thickness shows how much the classifier relies on
+    // its neuron: the average size (absolute value) of the neuron's 10
+    // weights into the classifier, one per digit. The sign is ignored, so
+    // the line stays gray. Scaled like the other weight lines, against
+    // W_DISPLAY_SD standard deviations of the classifier's initial spread.
+    function classifierToStroke(j) {
+      const meanAbs = classifierWeights.reduce((s, row) => s + Math.abs(row[j]), 0) /
+                      classifierWeights.length;
+      const t = Math.min(1, meanAbs / (W_DISPLAY_SD * classifierSd));
+      return HIDDEN_STROKE.min + t * (HIDDEN_STROKE.max - HIDDEN_STROKE.min);
     }
+    updateWeightDisplay();
     classifierLayer.appendChild(makeSvg("rect", {
       class: "classifier",
       x: CLASSIFIER_X - CLASSIFIER_W / 2,
