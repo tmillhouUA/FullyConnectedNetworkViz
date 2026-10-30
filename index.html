@@ -74,6 +74,32 @@
       stroke-width: 2.5;
     }
 
+    /* Bold frame while the user is drawing (like a selected neuron). */
+    .image-frame.selected {
+      stroke-width: 5;
+    }
+
+    /* Invisible target over the image that catches drawing. The cursor is a
+       small pencil (an inline SVG image, tip at 3,21), falling back to a
+       crosshair. touch-action: none stops a finger drag from scrolling the
+       page, so it draws instead.
+       Gotcha: in a data: URL, "#" would end the URL, so the SVG avoids
+       "#" colors and uses names (white, black). */
+    .draw-area {
+      fill: transparent;
+      pointer-events: all;
+      touch-action: none;
+      cursor: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24'><path d='M3 21l1.5-5L16 4.5l3.5 3.5L8 19.5z' fill='white' stroke='black' stroke-width='1.5' stroke-linejoin='round'/><path d='M3 21l1.5-5 3.5 3.5z' fill='black'/></svg>") 3 21, crosshair;
+    }
+
+    /* The user's strokes while drawing (before they become pixels). */
+    .draw-stroke {
+      fill: none;
+      stroke: #222222;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+
     /* Lines from each pixel to its input square. Thin and faint: there are
        196 of them, and they cross. */
     .pixel-link {
@@ -161,6 +187,44 @@
       fill: #daf0e3;
       stroke: #2ca25f;
       stroke-width: 2.5;
+    }
+
+    /* Bold while the misses are shown (like a selected neuron). */
+    .acc-panel.selected {
+      stroke-width: 5;
+    }
+
+    /* The whole panel, text included, is clickable (it shows the misses). */
+    .acc-group {
+      cursor: pointer;
+    }
+
+    /* ---------- Misses ---------- */
+    /* Thumbnails of the test images the network does worst on. No outline
+       per pixel (it would swamp pixels this small); crispEdges stops faint
+       seams from showing between neighboring pixels. */
+    .miss-pixel {
+      shape-rendering: crispEdges;
+    }
+
+    .miss-frame {
+      fill: none;
+      stroke: #2b7bd6;
+      stroke-width: 1.5;
+    }
+
+    /* Caption beside each thumbnail, e.g. "7 → 4" (true digit → guess). */
+    .miss-caption {
+      font-size: 16px;
+      fill: #444444;
+      dominant-baseline: central;
+    }
+
+    /* Invisible click target over each thumbnail and its caption. */
+    .miss-hit {
+      fill: transparent;
+      pointer-events: all;
+      cursor: pointer;
     }
 
     .acc-label {
@@ -447,7 +511,11 @@
     // labels: Uint8Array of digits; images: Uint8Array of count x 196 bytes
     // (0-255, 255 = ink).
     let data = null;
-    let currentLabel = null;  // label of the image on screen
+    let currentLabel = null;  // label of the image on screen ("?" if drawn)
+    // While the user is drawing: { strokes, saved } (see the Drawing
+    // section); null otherwise. The guess and neuron sizes hold still
+    // while it's set, since the inputs are blank until the drawing is done.
+    let drawing = null;
     let isTraining = false;
     let frameCount = 0;  // animation frames trained since Train was pressed
     let iteration = 0;   // weight updates (one per batch) since Initialize
@@ -835,14 +903,29 @@
       }));
     }
 
+    // The user's strokes while drawing, over the pixels (see Drawing).
+    const strokeLayer = makeSvg("g", {});
+    imageLayer.appendChild(strokeLayer);
+
     // Outer frame drawn over the pixels.
-    imageLayer.appendChild(makeSvg("rect", {
+    const imageFrame = makeSvg("rect", {
       class: "image-frame",
       x: IMAGE_LEFT,
       y: imageTop,
       width: IMAGE_SIZE,
       height: IMAGE_SIZE,
-    }));
+    });
+    imageLayer.appendChild(imageFrame);
+
+    // Invisible drawing target on top of the image (see Drawing).
+    const drawArea = makeSvg("rect", {
+      class: "draw-area",
+      x: IMAGE_LEFT,
+      y: imageTop,
+      width: IMAGE_SIZE,
+      height: IMAGE_SIZE,
+    });
+    imageLayer.appendChild(drawArea);
 
     // Label under the image (text set by updateInputDisplay).
     const imageLabel = makeSvg("text", {
@@ -861,6 +944,176 @@
         inputBoxes[p].setAttribute("fill", gray);
       }
       imageLabel.textContent = (currentLabel === null) ? "" : `Label: ${currentLabel}`;
+    }
+
+    // ---------- Drawing ----------
+    // Press on the image to draw a digit; lift and press again to add
+    // strokes. The first press clears the image, bolds its frame and sets
+    // the label to "?". A click anywhere else finishes the drawing: it's
+    // turned into a 14x14 input (see rasterizeDrawing) and run through the
+    // network. Resample discards a drawing in progress.
+    // Points are kept in image units: 0-280 across and down the image.
+    const diagram = document.getElementById("diagram");
+    const STROKE_PX     = 1.5;  // stroke width in final image pixels (MNIST-like)
+    const DRAW_SCALE    = 4;    // drawings are rasterized at 4x resolution...
+    const DRAW_FIT_PX   = 10;   // ...fit into a 10x10-pixel box, as MNIST fits 20x20 of 28x28
+    const DRAW_MAX_ZOOM = 4;    // but a tiny drawing is enlarged at most 4x
+    let activeStroke = null;    // { points, line } while the pointer is down
+
+    // Screen position of a pointer event -> image units, clamped to the image.
+    // getScreenCTM maps diagram units to screen pixels; its inverse undoes it.
+    function imagePoint(event) {
+      const p = new DOMPoint(event.clientX, event.clientY)
+        .matrixTransform(diagram.getScreenCTM().inverse());
+      const clamp = v => Math.max(0, Math.min(IMAGE_SIZE, v));
+      return { x: clamp(p.x - IMAGE_LEFT), y: clamp(p.y - imageTop) };
+    }
+
+    function startDrawing() {
+      drawing = { strokes: [], saved: { inputs: inputs.slice(), label: currentLabel } };
+      inputs.fill(0);
+      currentLabel = "?";
+      updateInputDisplay();
+      imageFrame.classList.add("selected");
+    }
+
+    // Leave drawing mode: clear the strokes and unbold the frame.
+    function endDrawing() {
+      drawing = null;
+      activeStroke = null;
+      strokeLayer.replaceChildren();
+      imageFrame.classList.remove("selected");
+    }
+
+    // Finish: turn the strokes into the inputs (or, if nothing was drawn,
+    // put the previous image back), then show the network's response.
+    function finishDrawing() {
+      if (drawing.strokes.length > 0) {
+        rasterizeDrawing(drawing.strokes).forEach((v, p) => { inputs[p] = v; });
+      } else {
+        drawing.saved.inputs.forEach((v, p) => { inputs[p] = v; });
+        currentLabel = drawing.saved.label;
+      }
+      endDrawing();
+      updateInputDisplay();
+      updateNeuronSizes();
+      updatePrediction();
+    }
+
+    // Resample: drop the drawing without using it (the new image replaces it).
+    function cancelDrawing() {
+      if (drawing !== null) endDrawing();
+    }
+
+    // Draw one stroke as an SVG polyline, as wide on screen as it will be
+    // in the image (if the drawing isn't resized much; see rasterizeDrawing).
+    function redrawStroke(stroke) {
+      stroke.line.setAttribute("points", stroke.points
+        .map(pt => `${IMAGE_LEFT + pt.x},${imageTop + pt.y}`).join(" "));
+    }
+
+    drawArea.addEventListener("pointerdown", event => {
+      if (drawing === null) startDrawing();
+      const pt = imagePoint(event);
+      // A lone point is listed twice so a tap still draws a round dot.
+      activeStroke = {
+        points: [pt, pt],
+        line: makeSvg("polyline", { class: "draw-stroke", "stroke-width": STROKE_PX * PIXEL_SIZE }),
+      };
+      strokeLayer.appendChild(activeStroke.line);
+      redrawStroke(activeStroke);
+      drawing.strokes.push(activeStroke.points);
+      // Keep receiving moves even if the pointer leaves the image mid-stroke.
+      drawArea.setPointerCapture(event.pointerId);
+    });
+
+    drawArea.addEventListener("pointermove", event => {
+      if (activeStroke === null) return;
+      activeStroke.points.push(imagePoint(event));
+      redrawStroke(activeStroke);
+    });
+
+    const endStroke = () => { activeStroke = null; };
+    drawArea.addEventListener("pointerup", endStroke);
+    drawArea.addEventListener("pointercancel", endStroke);
+
+    // Turn strokes into 14x14 inputs (0-1), roughly as MNIST was prepared:
+    //   1. Scale the drawing so its larger side fills DRAW_FIT_PX pixels
+    //      (keeping its proportions), centered.
+    //   2. Rasterize it at DRAW_SCALE x resolution with a round brush
+    //      STROKE_PX pixels wide: a fine cell is ink if it's within half a
+    //      stroke width of any stroke segment.
+    //   3. Shift it so its center of mass is at the image center, and
+    //      rasterize again there.
+    //   4. Average each DRAW_SCALE x DRAW_SCALE block into one pixel, which
+    //      gives soft gray edges like MNIST's.
+    // The brush width is fixed in the final image, so strokes come out the
+    // same thickness however large the drawing was.
+    function rasterizeDrawing(strokes) {
+      const N = IMAGE_COLS * DRAW_SCALE;          // 56 fine cells across
+      const natural = N / IMAGE_SIZE;             // image units -> fine cells, unscaled
+      const all = strokes.flat();
+      const xs = all.map(pt => pt.x), ys = all.map(pt => pt.y);
+      const minX = Math.min(...xs), maxX = Math.max(...xs);
+      const minY = Math.min(...ys), maxY = Math.max(...ys);
+      const extent = Math.max(maxX - minX, maxY - minY);
+      const scale = Math.min(DRAW_FIT_PX * DRAW_SCALE / Math.max(extent, 1e-9),
+                             DRAW_MAX_ZOOM * natural);
+      const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
+      const radius = STROKE_PX * DRAW_SCALE / 2;  // in fine cells
+
+      // Rasterize with the drawing's center placed at (N/2 + dx, N/2 + dy).
+      function rasterize(dx, dy) {
+        const segs = [];
+        for (const stroke of strokes) {
+          const pts = stroke.map(pt => ({ x: (pt.x - cx) * scale + N / 2 + dx,
+                                          y: (pt.y - cy) * scale + N / 2 + dy }));
+          for (let k = 1; k < pts.length; k++) segs.push([pts[k - 1], pts[k]]);
+        }
+        const fine = new Float32Array(N * N);
+        for (let r = 0; r < N; r++) {
+          for (let c = 0; c < N; c++) {
+            const px = c + 0.5, py = r + 0.5;  // the cell's center
+            for (const [a, b] of segs) {
+              if (distToSegment(px, py, a, b) <= radius) { fine[r * N + c] = 1; break; }
+            }
+          }
+        }
+        return fine;
+      }
+
+      // Center of mass, then shift by it (rounded to whole fine cells).
+      let fine = rasterize(0, 0);
+      let mass = 0, mx = 0, my = 0;
+      for (let r = 0; r < N; r++) {
+        for (let c = 0; c < N; c++) {
+          const v = fine[r * N + c];
+          mass += v; mx += v * (c + 0.5); my += v * (r + 0.5);
+        }
+      }
+      if (mass > 0) {
+        fine = rasterize(Math.round(N / 2 - mx / mass), Math.round(N / 2 - my / mass));
+      }
+
+      // Average each block of fine cells into one image pixel.
+      const out = new Array(NUM_INPUTS).fill(0);
+      for (let r = 0; r < N; r++) {
+        for (let c = 0; c < N; c++) {
+          const p = Math.floor(r / DRAW_SCALE) * IMAGE_COLS + Math.floor(c / DRAW_SCALE);
+          out[p] += fine[r * N + c] / (DRAW_SCALE * DRAW_SCALE);
+        }
+      }
+      return out;
+    }
+
+    // Distance from point (px, py) to the segment from a to b.
+    function distToSegment(px, py, a, b) {
+      const dx = b.x - a.x, dy = b.y - a.y;
+      const len2 = dx * dx + dy * dy;
+      // How far along the segment the nearest point is (0 = a, 1 = b).
+      const t = (len2 === 0) ? 0 :
+        Math.max(0, Math.min(1, ((px - a.x) * dx + (py - a.y) * dy) / len2));
+      return Math.hypot(px - (a.x + t * dx), py - (a.y + t * dy));
     }
 
     // ---------- Network ----------
@@ -960,6 +1213,7 @@
     // Since area is proportional to activation, radius goes as its square root.
     function updateNeuronSizes() {
       if (currentLabel === null) return;  // no image yet (data still loading)
+      if (drawing !== null) return;       // hold still until the drawing is done
       const acts = forward(inputs).acts;
       targetR.forEach((layer, l) => {
         const a = acts[l + 1].map(v => Math.max(0, v));  // negative counts as 0
@@ -1061,6 +1315,7 @@
         guessText.textContent = "";
         return;
       }
+      if (drawing !== null) return;  // hold still until the drawing is done
       const probs = forward(inputs).probs;
       const best = Math.max(...probs);
       guessText.textContent = `${probs.indexOf(best)}: ${Math.round(100 * best)}%`;
@@ -1068,15 +1323,20 @@
 
     // ---------- Accuracy panel ----------
     // Above the classifier box: test accuracy, then training accuracy.
+    // Panel and text share a group, so a click anywhere on it shows the
+    // misses (see Misses).
     const accPanelTop = classifierY - CLASSIFIER_H / 2 - ACC_PANEL_GAP - ACC_PANEL_H;
-    classifierLayer.appendChild(makeSvg("rect", {
+    const accGroup = makeSvg("g", { class: "acc-group" });
+    classifierLayer.appendChild(accGroup);
+    const accPanel = makeSvg("rect", {
       class: "acc-panel",
       x: CLASSIFIER_X - CLASSIFIER_W / 2,
       y: accPanelTop,
       width: CLASSIFIER_W,
       height: ACC_PANEL_H,
       rx: 10,
-    }));
+    });
+    accGroup.appendChild(accPanel);
     const accTexts = ["Test Acc.", "", "Train Acc.", "", "Iterations", "", "Epochs", ""].map((text, n) => {
       const el = makeSvg("text", {
         class: (n % 2 === 0) ? "acc-label" : "acc-value",
@@ -1084,7 +1344,7 @@
         y: accPanelTop + ACC_LINE_Y[n],
       });
       el.textContent = text;
-      classifierLayer.appendChild(el);
+      accGroup.appendChild(el);
       return el;
     });
     const testAccText   = accTexts[1];
@@ -1305,24 +1565,154 @@
     modeButtons.forEach(b => b.addEventListener("click", () => setHeatmapMode(b.dataset.mode)));
     setHeatmapMode(heatmapMode);
 
-    // Click a neuron to select it. stopPropagation keeps the same click from
-    // also reaching the document-wide handler below, which would deselect it.
+    // Click a neuron to select it (closing the misses). stopPropagation keeps
+    // the same click from also reaching the document-wide handler below,
+    // which would deselect it; so a click here that should only finish a
+    // drawing has to do that itself.
     neuronHits.forEach((layer, l) => layer.forEach((hit, j) => {
       hit.addEventListener("click", event => {
         event.stopPropagation();
+        if (drawing !== null) {
+          finishDrawing();
+          return;
+        }
         selected = { l, j };
+        showMisses = false;
         updateHeatmap();
+        updateMisses();
       });
     }));
 
-    // Click anywhere else to deselect, except the control and mode panels
-    // (both have the control-panel class, so the heatmap stays up while
-    // training or switching modes) and the heatmap itself.
-    document.addEventListener("click", event => {
-      if (event.target.closest(".control-panel, #heatmapLayer")) return;
-      if (selected === null) return;
+    // ---------- Misses ----------
+    // Clicking the accuracy panel shows, in the heatmap's place, the test
+    // image of each digit that the network gives the lowest probability of
+    // being that digit: its worst miss (usually misclassified, but possibly
+    // a correct guess made with little confidence). Two columns of five
+    // thumbnails, digits 0-4 then 5-9, each captioned "true digit → guess".
+    // Clicking a thumbnail loads that image as the input; the misses stay up.
+    // Clicking a neuron or the background closes them.
+    const MISS_SIZE    = 40;   // thumbnail width/height
+    const MISS_ROWS    = 5;
+    const MISS_GAP     = (HEATMAP_SIZE - MISS_ROWS * MISS_SIZE) / (MISS_ROWS - 1);  // 6
+    const MISS_COL_W   = HEATMAP_SIZE / 2;  // two columns across the heatmap's width
+    const MISS_INDENT  = 10;   // column's left edge to its thumbnails
+    const MISS_TEXT_DX = 10;   // thumbnail's right edge to its caption
+    let showMisses = false;
+    let misses = [];  // misses[d] = { k (test index), guess } for digit d
+
+    const missesGroup = makeSvg("g", {});
+    missesGroup.style.display = "none";
+    heatmapLayer.appendChild(missesGroup);  // inside heatmapLayer: clicks don't close it
+
+    // One slot per digit: 196 pixels, a frame, a caption and a click target.
+    const missSlots = [];
+    const missPixel = MISS_SIZE / IMAGE_COLS;
+    for (let d = 0; d < NUM_CLASSES; d++) {
+      const left = CLASSIFIER_X - HEATMAP_SIZE / 2 + Math.floor(d / MISS_ROWS) * MISS_COL_W + MISS_INDENT;
+      const top = heatmapTop + (d % MISS_ROWS) * (MISS_SIZE + MISS_GAP);
+      const pixels = [];
+      for (let p = 0; p < NUM_INPUTS; p++) {
+        const rect = makeSvg("rect", {
+          class: "miss-pixel",
+          x: left + (p % IMAGE_COLS) * missPixel,
+          y: top + Math.floor(p / IMAGE_COLS) * missPixel,
+          width: missPixel,
+          height: missPixel,
+        });
+        missesGroup.appendChild(rect);
+        pixels.push(rect);
+      }
+      missesGroup.appendChild(makeSvg("rect", {
+        class: "miss-frame", x: left, y: top, width: MISS_SIZE, height: MISS_SIZE,
+      }));
+      const caption = makeSvg("text", {
+        class: "miss-caption", x: left + MISS_SIZE + MISS_TEXT_DX, y: top + MISS_SIZE / 2,
+      });
+      missesGroup.appendChild(caption);
+      const hit = makeSvg("rect", {
+        class: "miss-hit", x: left, y: top, width: MISS_COL_W - MISS_INDENT, height: MISS_SIZE,
+      });
+      missesGroup.appendChild(hit);
+      // Load this miss as the input; stopPropagation keeps the misses up.
+      hit.addEventListener("click", event => {
+        event.stopPropagation();
+        if (!misses[d]) return;
+        cancelDrawing();
+        showImage(data.test, misses[d].k);
+      });
+      missSlots.push({ pixels, caption });
+    }
+
+    const missesLabel = makeSvg("text", {
+      class: "heat-label",
+      x: CLASSIFIER_X,
+      y: heatmapTop + HEATMAP_SIZE + HEATMAP_LABEL_GAP,
+    });
+    missesLabel.textContent = "Misses";
+    missesGroup.appendChild(missesLabel);
+
+    // For each digit, the test image of it with the lowest probability of
+    // being that digit, and what the network guesses for it instead.
+    function findMisses() {
+      const set = data.test;
+      const worst = new Array(NUM_CLASSES).fill(null);
+      for (let k = 0; k < set.count; k++) {
+        const probs = forward(imageInputs(set, k)).probs;
+        const d = set.labels[k];
+        if (worst[d] === null || probs[d] < worst[d].p) {
+          worst[d] = { k, p: probs[d], guess: probs.indexOf(Math.max(...probs)) };
+        }
+      }
+      return worst;
+    }
+
+    // Show or hide the misses (and bold the accuracy panel to match). When
+    // shown, they're re-found, so call this again after the weights change.
+    function updateMisses() {
+      accPanel.classList.toggle("selected", showMisses);
+      missesGroup.style.display = showMisses ? "" : "none";
+      if (!showMisses || !data) return;
+      misses = findMisses();
+      misses.forEach(({ k, guess }, d) => {
+        const offset = k * NUM_INPUTS;
+        missSlots[d].pixels.forEach((rect, p) =>
+          rect.setAttribute("fill", valueToGray(data.test.images[offset + p] / 255)));
+        missSlots[d].caption.textContent = `${d} → ${guess}`;  // → = right arrow
+      });
+    }
+
+    // Click the accuracy panel to show the misses (deselecting any neuron).
+    accGroup.addEventListener("click", event => {
+      event.stopPropagation();
+      if (drawing !== null) {
+        finishDrawing();
+        return;
+      }
       selected = null;
+      showMisses = true;
       updateHeatmap();
+      updateMisses();
+    });
+
+    // Clicks on the image are for drawing. While drawing, a click anywhere
+    // else finishes the drawing, and does only that. (Resample's own handler
+    // runs first and cancels the drawing, so it skips this.)
+    // Otherwise, click anywhere else to deselect the neuron or close the
+    // misses, except the control and mode panels (both have the
+    // control-panel class, so the heatmap stays up while training or
+    // switching modes) and the heatmap/misses area itself.
+    document.addEventListener("click", event => {
+      if (event.target === drawArea) return;
+      if (drawing !== null) {
+        finishDrawing();
+        return;
+      }
+      if (event.target.closest(".control-panel, #heatmapLayer")) return;
+      if (selected === null && !showMisses) return;
+      selected = null;
+      showMisses = false;
+      updateHeatmap();
+      updateMisses();
     });
 
     // ---------- Data ----------
@@ -1403,8 +1793,10 @@
 
     // Resample: once exemplars exist, the next digit in order (0, 1, 2, ...),
     // as one of its exemplars at random; before then, a random training image.
+    // Discards a drawing in progress.
     resampleButton.addEventListener("click", () => {
       if (!data) return;  // still loading
+      cancelDrawing();
       if (exemplars === null) {
         showRandomTrainingImage();
         return;
@@ -1432,6 +1824,7 @@
       updateCounters();
       updatePrediction();
       updateAccuracy();
+      updateMisses();
     });
 
     // One animation frame of training: a few SGD steps, then redraw the
@@ -1464,6 +1857,7 @@
       if (statsFrame) {
         updatePrediction();
         updateAccuracy();
+        if (showMisses) updateMisses();
       }
       trainFrameId = requestAnimationFrame(trainLoop);
     }
@@ -1498,6 +1892,7 @@
         updateHeatmap();
         updatePrediction();
         updateAccuracy();
+        updateMisses();
       } else {
         startTraining();
       }
