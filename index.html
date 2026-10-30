@@ -235,7 +235,7 @@
     }
 
     .acc-value {
-      font-size: 30px;
+      font-size: 26px;
       font-weight: 600;
       fill: #222222;
       text-anchor: middle;
@@ -430,12 +430,12 @@
     const CLASSIFIER_GUESS_DY = 18;
 
     // Accuracy panel: centered above the classifier box, the same width.
-    const ACC_PANEL_H   = 284;
+    const ACC_PANEL_H   = 290;
     const ACC_PANEL_GAP = 30;   // vertical gap between panel and box
     // Text line centers, measured down from the panel's top: a label and
-    // its value for each of test accuracy, training accuracy, iterations
-    // and epochs (66 units per pair).
-    const ACC_LINE_Y = [28, 58, 94, 124, 160, 190, 226, 256];
+    // its value for each of test accuracy, training accuracy, iterations,
+    // epochs and learning rate (54 units per pair).
+    const ACC_LINE_Y = [24, 50, 78, 104, 132, 158, 186, 212, 240, 266];
 
     // Weight heatmap: shown below the classifier when a neuron is clicked.
     // A first-layer neuron's 196 weights form a 14x14 image, like the input
@@ -454,7 +454,12 @@
     // and then redraws the weights, so the display speed is roughly
     // 60 x BATCHES_PER_FRAME x BATCH_SIZE images per second (~1 pass over
     // the 10,000 training images per second at these settings).
+    // The learning rate starts at LEARNING_RATE and halves every LR_DECAY_EPOCHS
+    // epochs, LR_DECAY_STEPS times at most (0.05 -> 0.025 -> 0.0125 -> 0.00625),
+    // so later training fine-tunes instead of bouncing around. See learningRate.
     const LEARNING_RATE     = 0.05;
+    const LR_DECAY_EPOCHS   = 10;
+    const LR_DECAY_STEPS    = 3;
     const BATCH_SIZE        = 32;
     // L1 penalty: adds L1_PENALTY x (sum of |weight|) to the loss, which
     // pushes unhelpful weights to exactly 0. Applies to every weight,
@@ -742,8 +747,9 @@
         const k = nextTrainIndex();
         loss += backward(imageInputs(data.train, k), data.train.labels[k], g);
       }
-      const step = LEARNING_RATE / BATCH_SIZE;
-      const shrink = LEARNING_RATE * L1_PENALTY;
+      const lr = learningRate();
+      const step = lr / BATCH_SIZE;
+      const shrink = lr * L1_PENALTY;
       for (let l = 0; l < weights.length; l++) {
         for (let j = 0; j < weights[l].length; j++) {
           biases[l][j] -= step * g.b[l][j];
@@ -769,6 +775,14 @@
     // (e.g. 2.5 = two and a half times through all 10,000 images).
     function epochs() {
       return data ? iteration * BATCH_SIZE / data.train.count : 0;
+    }
+
+    // Current learning rate: halved once per LR_DECAY_EPOCHS completed
+    // epochs, up to LR_DECAY_STEPS times. It depends only on the epoch
+    // count, so Initialize (which zeroes the count) resets it too.
+    function learningRate() {
+      const halvings = Math.min(LR_DECAY_STEPS, Math.floor(epochs() / LR_DECAY_EPOCHS));
+      return LEARNING_RATE * 0.5 ** halvings;
     }
 
     // Fraction of a set's first `count` images (default: all) classified
@@ -954,7 +968,7 @@
     // network. Resample discards a drawing in progress.
     // Points are kept in image units: 0-280 across and down the image.
     const diagram = document.getElementById("diagram");
-    const STROKE_PX     = 1.5;  // stroke width in final image pixels (MNIST-like)
+    const STROKE_PX     = 1.35; // stroke width in final image pixels (MNIST-like)
     const DRAW_SCALE    = 4;    // drawings are rasterized at 4x resolution...
     const DRAW_FIT_PX   = 10;   // ...fit into a 10x10-pixel box, as MNIST fits 20x20 of 28x28
     const DRAW_MAX_ZOOM = 4;    // but a tiny drawing is enlarged at most 4x
@@ -1337,7 +1351,8 @@
       rx: 10,
     });
     accGroup.appendChild(accPanel);
-    const accTexts = ["Test Acc.", "", "Train Acc.", "", "Iterations", "", "Epochs", ""].map((text, n) => {
+    const accTexts = ["Test Acc.", "", "Train Acc.", "", "Iterations", "", "Epochs", "",
+                      "Learning Rate", ""].map((text, n) => {
       const el = makeSvg("text", {
         class: (n % 2 === 0) ? "acc-label" : "acc-value",
         x: CLASSIFIER_X,
@@ -1351,12 +1366,14 @@
     const trainAccText  = accTexts[3];
     const iterationText = accTexts[5];
     const epochText     = accTexts[7];
+    const lrText        = accTexts[9];
 
-    // Show the iteration and epoch counts. Cheap, so done every frame.
-    // toLocaleString adds thousands separators (e.g. 12,345).
+    // Show the iteration and epoch counts and the learning rate. Cheap, so
+    // done every frame. toLocaleString adds thousands separators (e.g. 12,345).
     function updateCounters() {
       iterationText.textContent = iteration.toLocaleString();
       epochText.textContent = Math.floor(epochs());  // completed passes only
+      lrText.textContent = learningRate();
     }
     updateCounters();
 
