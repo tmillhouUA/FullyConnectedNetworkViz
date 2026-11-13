@@ -347,6 +347,7 @@
   <!-- Control panel: position and handlers are set by the script. -->
   <div class="control-panel" id="controlPanel">
     <button type="button" class="action-button" id="resampleButton">Resample</button>
+    <button type="button" class="action-button" id="resetButton">Reset</button>
     <button type="button" class="action-button" id="initButton">Initialize</button>
     <button type="button" class="action-button" id="trainButton">Train</button>
   </div>
@@ -464,7 +465,7 @@
     // L1 penalty: adds L1_PENALTY x (sum of |weight|) to the loss, which
     // pushes unhelpful weights to exactly 0. Applies to every weight,
     // including the classifier's, but not to biases. 0 turns it off.
-    const L1_PENALTY        = 3e-5;
+    const L1_PENALTY        = 5e-4;//1e-5;
     const BATCHES_PER_FRAME = 5;
     // While training, the top guess and the accuracies refresh only every
     // this-many frames (~1.5 times a second), so the numbers hold still long
@@ -600,6 +601,44 @@
       classifierWeights.push(...randomMatrix(NUM_CLASSES, LAST_HIDDEN, classifierSd));
       classifierBiases.length = 0;
       classifierBiases.push(...new Array(NUM_CLASSES).fill(0));
+      initialNetwork = copyNetwork();
+    }
+
+    // A copy of the network as last initialized, for Reset (which restores
+    // it) and for hovering over Reset (which displays its weights).
+    // Training changes the weights in place, so this has to be a deep copy:
+    // copying only the outer arrays would share the rows being changed.
+    let initialNetwork = null;
+    const copyMatrix = m => m.map(row => row.slice());
+
+    function copyNetwork() {
+      return {
+        weights:           weights.map(copyMatrix),
+        biases:            biases.map(row => row.slice()),
+        classifierWeights: copyMatrix(classifierWeights),
+        classifierBiases:  classifierBiases.slice(),
+      };
+    }
+
+    function restoreInitialNetwork() {
+      weights.length = 0;
+      weights.push(...initialNetwork.weights.map(copyMatrix));
+      biases.length = 0;
+      biases.push(...initialNetwork.biases.map(row => row.slice()));
+      classifierWeights.length = 0;
+      classifierWeights.push(...copyMatrix(initialNetwork.classifierWeights));
+      classifierBiases.length = 0;
+      classifierBiases.push(...initialNetwork.classifierBiases);
+    }
+
+    // While the mouse is over Reset, the weight lines, classifier lines and
+    // Weights heatmap show the initial weights instead of the current ones.
+    let showingInitial = false;
+    function displayedWeights() {
+      return showingInitial ? initialNetwork.weights : weights;
+    }
+    function displayedClassifierWeights() {
+      return showingInitial ? initialNetwork.classifierWeights : classifierWeights;
     }
 
     // ---------- Network math ----------
@@ -1176,11 +1215,13 @@
 
     // Apply every weight's color and thickness to its line, and each
     // classifier line's thickness (classifierLines is defined below).
+    // Shows the initial weights instead while the mouse is over Reset.
     function updateWeightDisplay() {
-      for (let l = 0; l < weights.length; l++) {
-        for (let j = 0; j < weights[l].length; j++) {
-          for (let i = 0; i < weights[l][j].length; i++) {
-            const w = weights[l][j][i];
+      const shown = displayedWeights();
+      for (let l = 0; l < shown.length; l++) {
+        for (let j = 0; j < shown[l].length; j++) {
+          for (let i = 0; i < shown[l][j].length; i++) {
+            const w = shown[l][j][i];
             const line = weightLines[l][j][i];
             line.style.stroke = weightToColor(w, l);
             line.style.strokeWidth = weightToStroke(w, l);
@@ -1294,8 +1335,8 @@
     // the line stays gray. Scaled like the other weight lines, against
     // W_DISPLAY_SD standard deviations of the classifier's initial spread.
     function classifierToStroke(j) {
-      const meanAbs = classifierWeights.reduce((s, row) => s + Math.abs(row[j]), 0) /
-                      classifierWeights.length;
+      const shown = displayedClassifierWeights();
+      const meanAbs = shown.reduce((s, row) => s + Math.abs(row[j]), 0) / shown.length;
       const t = Math.min(1, meanAbs / (W_DISPLAY_SD * classifierSd));
       return HIDDEN_STROKE.min + t * (HIDDEN_STROKE.max - HIDDEN_STROKE.min);
     }
@@ -1545,7 +1586,7 @@
       // The values to show and how to color them.
       let values, colorOf;
       if (heatmapMode === "weights") {
-        values = weights[selected.l][selected.j];
+        values = displayedWeights()[selected.l][selected.j];
       } else if (data) {
         values = analyzeNeuron(selected.l, selected.j)[heatmapMode];
       } else {
@@ -1611,9 +1652,12 @@
     const MISS_SIZE    = 40;   // thumbnail width/height
     const MISS_ROWS    = 5;
     const MISS_GAP     = (HEATMAP_SIZE - MISS_ROWS * MISS_SIZE) / (MISS_ROWS - 1);  // 6
-    const MISS_COL_W   = HEATMAP_SIZE / 2;  // two columns across the heatmap's width
-    const MISS_INDENT  = 10;   // column's left edge to its thumbnails
-    const MISS_TEXT_DX = 10;   // thumbnail's right edge to its caption
+    // Two columns across the classifier box's width (200), so the misses
+    // are no wider than the box. Each column: indent, thumbnail (40), gap,
+    // caption (~41 at 16px) = ~93 of its 100 units.
+    const MISS_COL_W   = CLASSIFIER_W / 2;
+    const MISS_INDENT  = 6;    // column's left edge to its thumbnails
+    const MISS_TEXT_DX = 6;    // thumbnail's right edge to its caption
     let showMisses = false;
     let misses = [];  // misses[d] = { k (test index), guess } for digit d
 
@@ -1625,7 +1669,7 @@
     const missSlots = [];
     const missPixel = MISS_SIZE / IMAGE_COLS;
     for (let d = 0; d < NUM_CLASSES; d++) {
-      const left = CLASSIFIER_X - HEATMAP_SIZE / 2 + Math.floor(d / MISS_ROWS) * MISS_COL_W + MISS_INDENT;
+      const left = CLASSIFIER_X - CLASSIFIER_W / 2 + Math.floor(d / MISS_ROWS) * MISS_COL_W + MISS_INDENT;
       const top = heatmapTop + (d % MISS_ROWS) * (MISS_SIZE + MISS_GAP);
       const pixels = [];
       for (let p = 0; p < NUM_INPUTS; p++) {
@@ -1694,7 +1738,8 @@
         const offset = k * NUM_INPUTS;
         missSlots[d].pixels.forEach((rect, p) =>
           rect.setAttribute("fill", valueToGray(data.test.images[offset + p] / 255)));
-        missSlots[d].caption.textContent = `${d} → ${guess}`;  // → = right arrow
+        // → = right arrow;   = thin space, narrower than a normal one
+        missSlots[d].caption.textContent = `${d} → ${guess}`;
       });
     }
 
@@ -1805,6 +1850,7 @@
     controlPanel.style.visibility = "visible";  // positioned, so safe to show
 
     const resampleButton = document.getElementById("resampleButton");
+    const resetButton    = document.getElementById("resetButton");
     const initButton     = document.getElementById("initButton");
     const trainButton    = document.getElementById("trainButton");
 
@@ -1824,11 +1870,40 @@
     });
 
     // Initialize: pause training, then new random weights (He
-    // initialization) and a fresh start on the training set, with every
-    // display brought up to date.
+    // initialization) and a fresh start on the training set.
     initButton.addEventListener("click", () => {
       stopTraining();
       initializeWeights();
+      restartTraining();
+    });
+
+    // Reset: pause training, then put back the weights from the last
+    // Initialize and start training over from them. (The training images
+    // are reshuffled, so retraining won't retrace the same path exactly.)
+    resetButton.addEventListener("click", () => {
+      stopTraining();
+      restoreInitialNetwork();
+      restartTraining();
+    });
+
+    // Hovering over Reset shows the initial weights, for comparison with
+    // the current ones. Mouse only: a touch "hover" has no matching leave,
+    // so it could get stuck showing the initial weights.
+    function showInitialWeights(show) {
+      showingInitial = show;
+      updateWeightDisplay();
+      if (heatmapMode === "weights") updateHeatmap();
+    }
+    resetButton.addEventListener("pointerenter", event => {
+      if (event.pointerType === "mouse") showInitialWeights(true);
+    });
+    resetButton.addEventListener("pointerleave", event => {
+      if (event.pointerType === "mouse") showInitialWeights(false);
+    });
+
+    // Shared by Initialize and Reset, after the weights are set: zero the
+    // counts, forget the exemplars, and bring every display up to date.
+    function restartTraining() {
       iteration = 0;
       trainOrder = [];
       trainPos = 0;
@@ -1842,7 +1917,7 @@
       updatePrediction();
       updateAccuracy();
       updateMisses();
-    });
+    }
 
     // One animation frame of training: a few SGD steps, then redraw the
     // weights, neuron sizes and counters, and every STATS_EVERY frames
